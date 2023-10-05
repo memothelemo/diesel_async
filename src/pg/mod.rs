@@ -20,12 +20,13 @@ use diesel::{ConnectionError, ConnectionResult, QueryResult};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt};
 use futures_util::{Future, FutureExt, StreamExt};
+use tokio_postgres::tls::MakeTlsConnect;
 use std::borrow::Cow;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::types::Type;
-use tokio_postgres::Statement;
+use tokio_postgres::{Statement, Socket, Connection, NoTls};
 
 pub use self::transaction_builder::TransactionBuilder;
 
@@ -102,6 +103,10 @@ pub struct AsyncPgConnection {
     stmt_cache: Arc<Mutex<StmtCache<diesel::pg::Pg, Statement>>>,
     transaction_state: Arc<Mutex<AnsiTransactionManager>>,
     metadata_cache: Arc<Mutex<PgMetadataCache>>,
+    // This is to keep track of this object and when it is
+    // time to be dropped, the connection stream from Self::establish
+    // must be dropped as well.
+    _conn_messenger: Arc<mpsc::Sender<()>>,
 }
 
 #[async_trait::async_trait]
@@ -124,12 +129,15 @@ impl AsyncConnection for AsyncPgConnection {
         let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
             .await
             .map_err(ErrorHelper)?;
+
+        let (sender, recv) = mpsc::channel::<()>(1);
         tokio::spawn(async move {
-            if let Err(e) = connection.await {
+            if let Err(e) = wait_until_disconnected::<NoTls>(connection, recv).await {
                 eprintln!("connection error: {e}");
             }
         });
-        Self::try_from(client).await
+
+        Self::try_from(client, sender).await
     }
 
     fn load<'conn, 'query, T>(&'conn mut self, source: T) -> Self::LoadFuture<'conn, 'query>
@@ -268,13 +276,37 @@ impl AsyncPgConnection {
         TransactionBuilder::new(self)
     }
 
-    /// Construct a new `AsyncPgConnection` instance from an existing [`tokio_postgres::Client`]
-    pub async fn try_from(conn: tokio_postgres::Client) -> ConnectionResult<Self> {
+    /// Construct a new `AsyncPgConnection` instance from an existing [`tokio_postgres::Client`].
+    /// 
+    /// Unlike from original diesel_async, you're required to have `conn_messenger` present
+    /// where its type is [`tokio::mpsc::Sender`]. This allows to the connection stream with [`wait_until_disconnected`].
+    /// 
+    /// **Usage**:
+    /// ```rs,no-run
+    /// // We first set up the way we want rustls to work.
+    /// let rustls_config = rustls::ClientConfig::builder()
+    ///     .with_safe_defaults()
+    ///     .with_root_certificates(root_certs())
+    ///     .with_no_client_auth();
+    /// let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+    /// let (client, conn) = tokio_postgres::connect(config, tls)
+    ///     .await
+    ///     .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+    /// let (sender, receiver) = tokio::sync::mpsc::channel::<()>(1);
+    /// tokio::spawn(async move {
+    ///     if let Err(e) = diesel_async::pg::wait_until_disconnected::<MakeRustlsConnect>(conn, receiver).await {
+    ///         eprintln!("Database connection: {e}");
+    ///     }
+    /// });
+    /// AsyncPgConnection::try_from(client, sender).await
+    /// ```
+    pub async fn try_from(conn: tokio_postgres::Client, conn_messenger: mpsc::Sender<()>) -> ConnectionResult<Self> {
         let mut conn = Self {
             conn: Arc::new(conn),
             stmt_cache: Arc::new(Mutex::new(StmtCache::new())),
             transaction_state: Arc::new(Mutex::new(AnsiTransactionManager::default())),
             metadata_cache: Arc::new(Mutex::new(PgMetadataCache::new())),
+            _conn_messenger: Arc::new(conn_messenger),
         };
         conn.set_config_options()
             .await
@@ -481,6 +513,20 @@ impl crate::pooled_connection::PoolableConnection for AsyncPgConnection {
         use crate::TransactionManager;
 
         Self::TransactionManager::is_broken_transaction_manager(self) || self.conn.is_closed()
+    }
+}
+
+/// Waits either connection from [`tokio_postgres`] or `conn_messenger` is completed.
+pub async fn wait_until_disconnected<T>(
+    conn: Connection<Socket, T::Stream>,
+    mut recv: mpsc::Receiver<()>
+) -> Result<(), tokio_postgres::Error>
+where
+    T: MakeTlsConnect<Socket>
+{
+    tokio::select! {
+        Err(e) = conn => Err(e),
+        None = recv.recv() => Ok(())
     }
 }
 

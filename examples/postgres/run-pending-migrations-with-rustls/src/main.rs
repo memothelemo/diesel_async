@@ -4,6 +4,7 @@ use diesel_async::AsyncPgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
@@ -36,12 +37,13 @@ fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConne
         let (client, conn) = tokio_postgres::connect(config, tls)
             .await
             .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+        let (sender, receiver) = tokio::sync::mpsc::channel::<()>(1);
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
+            if let Err(e) = diesel_async::pg::wait_until_disconnected::<MakeRustlsConnect>(conn, receiver).await {
                 eprintln!("Database connection: {e}");
             }
         });
-        AsyncPgConnection::try_from(client).await
+        AsyncPgConnection::try_from(client, sender).await
     };
     fut.boxed()
 }

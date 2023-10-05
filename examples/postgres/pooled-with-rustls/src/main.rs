@@ -5,6 +5,7 @@ use diesel_async::pooled_connection::ManagerConfig;
 use diesel_async::AsyncPgConnection;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use std::time::Duration;
 
 #[tokio::main]
@@ -50,12 +51,13 @@ fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConne
         let (client, conn) = tokio_postgres::connect(config, tls)
             .await
             .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+        let (sender, receiver) = tokio::sync::mpsc::channel::<()>(1);
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
+            if let Err(e) = diesel_async::pg::wait_until_disconnected::<MakeRustlsConnect>(conn, receiver).await {
                 eprintln!("Database connection: {e}");
             }
         });
-        AsyncPgConnection::try_from(client).await
+        AsyncPgConnection::try_from(client, sender).await
     };
     fut.boxed()
 }
