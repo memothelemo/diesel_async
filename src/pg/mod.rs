@@ -314,6 +314,11 @@ impl AsyncPgConnection {
         Ok(conn)
     }
 
+    /// Attempts to close Postgres connection
+    pub async fn close(&self) {
+        self._conn_messenger.send(()).await.unwrap();
+    }
+
     /// Constructs a cancellation token that can later be used to request cancellation of a query running on the connection associated with this client.
     pub fn cancel_token(&self) -> tokio_postgres::CancelToken {
         self.conn.cancel_token()
