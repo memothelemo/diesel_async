@@ -531,7 +531,7 @@ where
 {
     tokio::select! {
         Err(e) = conn => Err(e),
-        None = recv.recv() => Ok(())
+        _ = recv.recv() => Ok(())
     }
 }
 
