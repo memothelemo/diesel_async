@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use diesel::{ConnectionError, ConnectionResult};
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::AsyncPgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, Either};
 use futures_util::FutureExt;
+use tokio::sync::{broadcast, oneshot};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
@@ -36,12 +39,20 @@ fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConne
         let (client, conn) = tokio_postgres::connect(config, tls)
             .await
             .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+
+        let (tx, rx) = broadcast::channel(1);
+        let (conn_tx, conn_rx) = oneshot::channel();
+
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("Database connection: {e}");
+            match futures_util::future::select(conn_rx, conn).await {
+                Either::Left(_) | Either::Right((Ok(_), _)) => {}
+                Either::Right((Err(e), _)) => {
+                    let _ = tx.send(Arc::new(e));
+                }
             }
         });
-        AsyncPgConnection::try_from(client).await
+
+        AsyncPgConnection::try_from(client, Some(rx), Some(conn_tx)).await
     };
     fut.boxed()
 }

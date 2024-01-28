@@ -297,8 +297,13 @@ impl AsyncPgConnection {
     }
 
     /// Construct a new `AsyncPgConnection` instance from an existing [`tokio_postgres::Client`]
-    pub async fn try_from(conn: tokio_postgres::Client) -> ConnectionResult<Self> {
-        Self::setup(conn, None, None).await
+    /// with additional arguments that are hidden from [`Self::setup`].
+    pub async fn try_from(
+        conn: tokio_postgres::Client,
+        connection_future: Option<broadcast::Receiver<Arc<tokio_postgres::Error>>>,
+        shutdown_channel: Option<oneshot::Sender<()>>,
+    ) -> ConnectionResult<Self> {
+        Self::setup(conn, connection_future, shutdown_channel).await
     }
 
     async fn setup(

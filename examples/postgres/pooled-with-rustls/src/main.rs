@@ -4,8 +4,12 @@ use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::ManagerConfig;
 use diesel_async::AsyncPgConnection;
 use futures_util::future::BoxFuture;
+use futures_util::future::Either;
 use futures_util::FutureExt;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::sync::oneshot;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,12 +54,20 @@ fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConne
         let (client, conn) = tokio_postgres::connect(config, tls)
             .await
             .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+
+        let (tx, rx) = broadcast::channel(1);
+        let (conn_tx, conn_rx) = oneshot::channel();
+
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("Database connection: {e}");
+            match futures_util::future::select(conn_rx, conn).await {
+                Either::Left(_) | Either::Right((Ok(_), _)) => {}
+                Either::Right((Err(e), _)) => {
+                    let _ = tx.send(Arc::new(e));
+                }
             }
         });
-        AsyncPgConnection::try_from(client).await
+
+        AsyncPgConnection::try_from(client, Some(rx), Some(conn_tx)).await
     };
     fut.boxed()
 }
