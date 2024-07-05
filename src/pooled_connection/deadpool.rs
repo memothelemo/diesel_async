@@ -27,6 +27,13 @@
 //! #     config
 //! #  }
 //! #
+//! # #[cfg(feature = "sqlite")]
+//! # fn get_config() -> AsyncDieselConnectionManager<diesel_async::sync_connection_wrapper::SyncConnectionWrapper<diesel::SqliteConnection>> {
+//! #     let db_url = database_url_from_env("SQLITE_DATABASE_URL");
+//! #     let config = AsyncDieselConnectionManager::<diesel_async::sync_connection_wrapper::SyncConnectionWrapper<diesel::SqliteConnection>>::new(db_url);
+//! #     config
+//! # }
+//! #
 //! # async fn run_test() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
 //! #     use schema::users::dsl::*;
 //! #     let config = get_config();
@@ -58,11 +65,10 @@ pub type Hook<C> = deadpool::managed::Hook<AsyncDieselConnectionManager<C>>;
 /// Type alias for using [`deadpool::managed::HookError`] with [`diesel-async`]
 pub type HookError = deadpool::managed::HookError<super::PoolError>;
 
-#[async_trait::async_trait]
 impl<C> Manager for AsyncDieselConnectionManager<C>
 where
     C: PoolableConnection + Send + 'static,
-    diesel::dsl::BareSelect<diesel::dsl::AsExprOf<i32, diesel::sql_types::Integer>>:
+    diesel::dsl::select<diesel::dsl::AsExprOf<i32, diesel::sql_types::Integer>>:
         crate::methods::ExecuteDsl<C>,
     diesel::query_builder::SqlQuery: QueryFragment<C::Backend>,
 {
@@ -82,8 +88,8 @@ where
         _: &deadpool::managed::Metrics,
     ) -> deadpool::managed::RecycleResult<Self::Error> {
         if std::thread::panicking() || obj.is_broken() {
-            return Err(deadpool::managed::RecycleError::StaticMessage(
-                "Broken connection",
+            return Err(deadpool::managed::RecycleError::Message(
+                "Broken connection".into(),
             ));
         }
         obj.ping(&self.manager_config.recycling_method)
